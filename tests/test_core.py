@@ -82,3 +82,38 @@ def test_parse_page():
 def test_parse_page_has_next():
     _, has_next = parse_page(SAMPLE.replace("1～2件&nbsp;/&nbsp;全2件", "1～100件&nbsp;/&nbsp;全284件"))
     assert has_next
+
+
+# --- market -----------------------------------------------------------------
+
+from stockapp.market import enrich, parse_chart, parse_spark  # noqa: E402
+
+SPARK = {"spark": {"result": [
+    {"symbol": "4586.T", "response": [{"meta": {
+        "symbol": "4586.T", "regularMarketPrice": 107.0, "fulldayChange": 30.0,
+        "regularMarketChangePercent": 38.961, "regularMarketDayHigh": 107.0,
+        "regularMarketDayLow": 76.0, "regularMarketVolume": 48351100, "regularMarketTime": 1795156200}}]},
+    {"symbol": "9999.T", "response": []},
+], "error": None}}
+
+
+def test_parse_spark_and_enrich():
+    rows = parse_spark(SPARK)
+    assert len(rows) == 1
+    assert rows[0]["prev_close"] == 77.0
+    df = enrich(pd.DataFrame(rows))
+    assert df.loc[0, "code"] == "4586"
+    assert df.loc[0, "limit"] == "S高引け"
+    assert pd.isna(df.loc[0, "volume_ratio"])  # 平均出来高なしでも落ちない
+
+
+def test_parse_chart_drops_empty_days():
+    payload = {"chart": {"result": [{
+        "meta": {"exchangeTimezoneName": "Asia/Tokyo"},
+        "timestamp": [1795046400, 1795132800, 1795392000],
+        "indicators": {"quote": [{"open": [1, 2, None], "high": [1, 2, None], "low": [1, 2, None],
+                                  "close": [1.0, 2.0, None], "volume": [10, 20, None]}]},
+    }]}}
+    df = parse_chart(payload)
+    assert len(df) == 2
+    assert str(df.index[-1].date()) == "2026-11-20"

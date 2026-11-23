@@ -120,7 +120,10 @@ PRICE_COLUMN_CONFIG = {
     "前日比": st.column_config.NumberColumn(format="%+.1f"),
     "前日比%": st.column_config.NumberColumn(format="%+.2f%%"),
     "出来高": st.column_config.NumberColumn(format="localized"),
-    "出来高倍率": st.column_config.NumberColumn(help="当日出来高 ÷ 3か月平均出来高", format="%.1f倍"),
+    "出来高倍率": st.column_config.NumberColumn(
+        help="当日出来高 ÷ 平均出来高（3か月）。Yahoo の平均出来高が取れないときは空欄になります（ウォッチ銘柄は日足から計算）",
+        format="%.1f倍",
+    ),
 }
 
 
@@ -204,6 +207,17 @@ earnings = safe(get_earnings, label="決算発表予定")
 # ウォッチ銘柄の相場
 w = watch.merge(mkt.drop(columns=["name"]), on="code", how="left")
 w["name"] = w["name"].where(w["name"] != "", w["code"].map(dict(zip(listing["code"], listing["name"]))))
+
+# 3か月平均出来高が取れなかった場合は、日足（直近60営業日、当日を除く）から出来高倍率を計算する
+if w["volume_ratio"].isna().any():
+    w_hist = safe(get_history, tuple(to_yahoo(c) for c in w["code"]), "6mo", label="ウォッチ銘柄の日足") or {}
+    for i, r in w[w["volume_ratio"].isna()].iterrows():
+        h = w_hist.get(to_yahoo(r["code"]))
+        if h is None or len(h) < 2 or pd.isna(r.get("volume")):
+            continue
+        past = h[h.index.date < r["date"]]["Volume"].tail(60) if pd.notna(r.get("date")) else h["Volume"].iloc[:-1].tail(60)
+        if past.mean() > 0:
+            w.loc[i, "volume_ratio"] = r["volume"] / past.mean()
 
 
 def next_earnings(code: str) -> tuple[dt.date | None, str]:

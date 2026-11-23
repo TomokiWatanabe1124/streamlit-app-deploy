@@ -1,0 +1,84 @@
+import pandas as pd
+import pytest
+
+from stockapp.price_limits import classify_limit, limit_prices, limit_width
+from stockapp.tdnet import categorize, parse_page
+from stockapp.watchlist import normalize_code
+
+
+@pytest.mark.parametrize(
+    "base,width",
+    [(77, 30), (99, 30), (100, 50), (499, 80), (500, 100), (999, 150), (1000, 300),
+     (1783, 400), (2999, 500), (3000, 700), (9999, 1500), (49_999, 7_000), (60_000_000, 10_000_000)],
+)
+def test_limit_width(base, width):
+    assert limit_width(base) == width
+
+
+def test_limit_prices_floor():
+    assert limit_prices(10) == (40, 1.0)
+
+
+@pytest.mark.parametrize(
+    "prev,high,low,close,expected",
+    [
+        (77, 107, 76, 107, "S高引け"),   # 4586 の実例
+        (139, 185, 90, 185, ""),          # 上限 189 に届かず
+        (1000, 1300, 990, 1250, "S高到達"),
+        (1000, 1010, 700, 700, "S安引け"),
+        (1000, 1010, 700, 750, "S安到達"),
+        (1000, 1010, 990, 1000, ""),
+        (float("nan"), 1, 1, 1, ""),
+    ],
+)
+def test_classify_limit(prev, high, low, close, expected):
+    assert classify_limit(prev, high, low, close) == expected
+
+
+@pytest.mark.parametrize("raw,code", [("2801", "2801"), ("28010", "2801"), ("2801.T", "2801"),
+                                       (2801, "2801"), ("130a", "130A"), ("130A0", "130A"), ("2801.0", "2801")])
+def test_normalize_code(raw, code):
+    assert normalize_code(raw) == code
+
+
+@pytest.mark.parametrize(
+    "title,cat",
+    [
+        ("2026年12月期通期業績予想の修正に関するお知らせ", "業績修正"),
+        ("通期業績計画の修正に関するお知らせ", "業績修正"),
+        ("業績予想及び配当予想の修正に関するお知らせ", "業績修正"),
+        ("配当予想の修正（増配）に関するお知らせ", "配当"),
+        ("2027年3月期 第2四半期（中間期）決算短信〔日本基準〕（連結）", "決算"),
+        ("自己株式の取得状況に関するお知らせ", ""),
+    ],
+)
+def test_categorize(title, cat):
+    assert categorize(title) == cat
+
+
+SAMPLE = """
+<html><body>
+<div>1～2件&nbsp;/&nbsp;全2件</div>
+<table id="main-list-table">
+<tr><td class="oddnew-L kjTime">15:30</td><td class="oddnew-M kjCode">28010</td>
+<td class="oddnew-M kjName">キッコーマン</td>
+<td class="oddnew-M kjTitle"><a href="140120261120000001.pdf">業績予想の修正に関するお知らせ</a></td></tr>
+<tr><td class="evennew-L kjTime">16:00</td><td class="evennew-M kjCode">84100</td>
+<td class="evennew-M kjName">セブン銀行</td>
+<td class="evennew-M kjTitle"><a href="140120261120000002.pdf">自己株式の取得状況に関するお知らせ</a></td></tr>
+</table></body></html>
+"""
+
+
+def test_parse_page():
+    rows, has_next = parse_page(SAMPLE)
+    assert not has_next
+    df = pd.DataFrame(rows)
+    assert df["code"].tolist() == ["2801", "8410"]
+    assert df.loc[0, "category"] == "業績修正"
+    assert df.loc[0, "url"].endswith("140120261120000001.pdf")
+
+
+def test_parse_page_has_next():
+    _, has_next = parse_page(SAMPLE.replace("1～2件&nbsp;/&nbsp;全2件", "1～100件&nbsp;/&nbsp;全284件"))
+    assert has_next

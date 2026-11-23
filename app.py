@@ -10,7 +10,7 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-from stockapp import jpx, market, tdnet
+from stockapp import __version__, jpx, market, tdnet
 from stockapp.watchlist import load_watchlist, to_yahoo
 
 st.set_page_config(page_title="東証 夕方チェック", page_icon="📈", layout="wide")
@@ -176,6 +176,8 @@ with st.sidebar:
         "リポジトリの `watchlist.csv` を編集してください。GitHub の画面で編集してコミットすると、"
         "アプリに自動で反映されます。"
     )
+    st.divider()
+    st.caption(f"バージョン {__version__}（株価: Yahoo spark API）")
 
 watch = load_watchlist()
 listing = safe(get_listing, label="上場銘柄一覧")

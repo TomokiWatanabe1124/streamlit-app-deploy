@@ -47,8 +47,10 @@ def parse_listing(content: bytes) -> pd.DataFrame:
     df = df[df["市場・商品区分"].isin(STOCK_SEGMENTS)].copy()
     df["code"] = df["コード"].map(normalize_code)
     df["market"] = df["市場・商品区分"].str.replace("（内国株式）", "", regex=False)
-    df = df.rename(columns={"銘柄名": "name", "33業種区分": "sector"})
-    return df[["code", "name", "market", "sector"]].reset_index(drop=True)
+    df = df.rename(columns={"銘柄名": "name", "33業種区分": "sector", "規模区分": "size"})
+    if "size" not in df:
+        df["size"] = "-"
+    return df[["code", "name", "market", "sector", "size"]].reset_index(drop=True)
 
 
 def fetch_listing() -> pd.DataFrame:

@@ -10,7 +10,7 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-from stockapp import __version__, jpx, market, tdnet
+from stockapp import __version__, company, jpx, market, tdnet
 from stockapp.watchlist import load_watchlist, to_yahoo
 
 st.set_page_config(page_title="東証 夕方チェック", page_icon="📈", layout="wide")
@@ -47,6 +47,16 @@ def get_history(symbols: tuple[str, ...], period: str = "6mo") -> dict[str, pd.D
 @st.cache_data(ttl=60 * 30, show_spinner="適時開示を取得中…")
 def get_disclosures(day: dt.date) -> pd.DataFrame:
     return tdnet.fetch_day(day)
+
+
+@st.cache_data(ttl=60 * 30, show_spinner="適時開示を取得中…")
+def get_disclosures_range(days: tuple[dt.date, ...], today: dt.date) -> pd.DataFrame:
+    return tdnet.fetch_days(list(days), today)
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def get_valuation(symbol: str) -> dict:
+    return market.fetch_valuation(symbol)
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner="決算発表予定を取得中…")
@@ -251,8 +261,8 @@ w["注目"] = w.apply(watch_flags, axis=1)
 # タブ
 # ---------------------------------------------------------------------------
 
-tab_sum, tab_watch, tab_rank, tab_disc, tab_earn = st.tabs(
-    ["📊 サマリー", "⭐ ウォッチリスト", "🏆 ランキング", "📰 適時開示", "📅 決算スケジュール"]
+tab_sum, tab_watch, tab_rank, tab_disc, tab_earn, tab_co = st.tabs(
+    ["📊 サマリー", "⭐ ウォッチリスト", "🏆 ランキング", "📰 適時開示", "📅 決算スケジュール", "🏢 企業情報"]
 )
 
 # --- サマリー -------------------------------------------------------------
@@ -455,3 +465,109 @@ with tab_earn:
             f"出所: 日本取引所グループ「決算発表予定日」。現在 {jp_date(latest_known)} までの予定が公開されています。"
             "JPX は決算期末の月ごとに予定を公表するため、先の日付ほど件数が少なく表示されます。"
         )
+
+# --- 企業情報 ---------------------------------------------------------------
+with tab_co:
+    st.subheader("企業情報")
+    labels = {r.code: f"{r.code} {r.name}（{r.market}・{r.sector}）" for r in listing.itertuples()}
+    watch_codes = [c for c in watch["code"] if c in labels]
+    options = watch_codes + [c for c in labels if c not in set(watch_codes)]
+    code = st.selectbox(
+        "証券コードか企業名を入力して選んでください（ウォッチ銘柄が先頭に並びます）",
+        options, index=None, format_func=labels.get, placeholder="例: 2801 / キッコーマン",
+    )
+    if code is None:
+        st.info("企業を選ぶと、基本情報・株価水準の見方・最近の適時開示・外部リンク、"
+                "そして強みとリスクを Claude.ai に聞くための質問文が表示されます。")
+    else:
+        info = listing[listing["code"] == code].iloc[0]
+        sym = to_yahoo(code)
+        st.markdown(f"### {code} {info['name']}")
+        st.caption(f"{info['market']}市場 ｜ {info['sector']} ｜ 規模区分: {info.get('size', '-')}")
+
+        # ① 基本情報 -------------------------------------------------------
+        q = mkt[mkt["code"] == code]
+        hist_map = safe(get_history, (sym, "1306.T"), "1y", label="日足") or {}
+        hist = hist_map.get(sym)
+        view = company.analyze(hist, hist_map.get("1306.T")) if hist is not None else None
+        val = get_valuation(sym)
+        ne_date, ne_src = next_earnings(code)
+        ne_text = f"{jp_date(ne_date)}（{ne_src}）" if ne_date else "未定"
+
+        c = st.columns(4)
+        if not q.empty:
+            r = q.iloc[0]
+            c[0].metric(f"終値（{jp_date(r['date'])}）", f"{r['close']:,.1f}円",
+                        f"{r['change']:+,.1f}円 ({r['change_pct']:+.2f}%)")
+        elif view is not None:
+            c[0].metric(f"終値（{view.date:%m/%d}）", f"{view.close:,.1f}円")
+        if view is not None:
+            c[1].metric("52週高値", f"{view.high_52w:,.1f}円")
+            c[2].metric("52週安値", f"{view.low_52w:,.1f}円")
+        c[3].metric("次回決算", jp_date(ne_date) if ne_date else "未定", help=ne_src or None)
+
+        if val:
+            c = st.columns(5)
+            for col, (k, lab, f, suf) in zip(c, [
+                ("per", "PER（実績）", ".1f", "倍"), ("forward_per", "PER（予想）", ".1f", "倍"),
+                ("pbr", "PBR", ".2f", "倍"), ("dividend_yield", "配当利回り", ".2f", "%"),
+                ("market_cap_oku", "時価総額", ",.0f", "億円"),
+            ]):
+                col.metric(lab, f"{val[k]:{f}}{suf}" if val.get(k) is not None else "-")
+        else:
+            st.caption("PER・PBR・配当利回りは取得できませんでした。下の外部リンク（Yahoo!ファイナンス、株探）で確認できます。")
+
+        # ② 株価水準の見方 --------------------------------------------------
+        st.markdown("#### 📐 株価水準の見方（自動コメント）")
+        if view is None:
+            st.caption("日足データが取得できないため、表示できません。")
+        else:
+            for icon, text in view.comments:
+                st.markdown(f"{icon} {text}")
+            c = st.columns(6)
+            def pct(v):
+                return "-" if v is None else f"{v:+.1f}%"
+            c[0].metric("1か月", pct(view.ret_1m))
+            c[1].metric("3か月", pct(view.ret_3m))
+            c[2].metric("1年", pct(view.ret_1y))
+            c[3].metric("25日線乖離", pct(view.dev_ma25))
+            c[4].metric("RSI(14)", "-" if view.rsi14 is None else f"{view.rsi14:.0f}")
+            c[5].metric("対TOPIX(3か月)", "-" if view.rel_3m is None else f"{view.rel_3m:+.1f}pt")
+            st.caption("株価データに決まったルールを当てはめた機械的な目安です。業績や割安・割高の判断は含みません（下の質問文で Claude に聞けます）。")
+            st.plotly_chart(candle_chart(hist, f"{code} {info['name']}（1年）"), width="stretch")
+
+        # ③ 最近の適時開示 --------------------------------------------------
+        st.markdown("#### 📰 最近の適時開示（TDnet）")
+        span = st.radio("期間", [7, 14, 30], index=0, horizontal=True, format_func=lambda d: f"直近{d}日",
+                        key="co_span",
+                        help="TDnet の一覧を日ごとに読み込むため、14日・30日は初回に20秒〜1分ほどかかります（2回目以降は速くなります）")
+        today = now.date()
+        days = tuple(today - dt.timedelta(days=i) for i in range(span)
+                     if (today - dt.timedelta(days=i)).weekday() < 5)
+        rng = safe(get_disclosures_range, days, today, label="適時開示")
+        co_disc = rng[rng["code"] == code] if rng is not None else pd.DataFrame(columns=tdnet.COLUMNS + ["day"])
+        if co_disc.empty:
+            st.caption(f"直近{span}日の開示はありません。")
+        else:
+            st.dataframe(
+                co_disc[["day", "time", "category", "title", "url"]].rename(
+                    columns={"day": "日付", "time": "時刻", "category": "分類", "title": "表題", "url": "PDF"}),
+                hide_index=True, width="stretch",
+                column_config={"PDF": st.column_config.LinkColumn(display_text="開く")},
+            )
+
+        # ④ 外部リンク ------------------------------------------------------
+        st.markdown("#### 🔗 IR・企業情報へのリンク")
+        for site, url, desc in company.external_links(code, info["name"]):
+            st.markdown(f"- [{site}]({url})　— {desc}")
+
+        # ⑤ Claude.ai への質問文 -------------------------------------------
+        st.markdown("#### 🤖 強み・リスク・株価水準を Claude に聞く")
+        st.markdown(
+            "下の質問文の右上にあるコピーボタンを押し、[Claude.ai](https://claude.ai/new) の新しいチャットに貼り付けて送信してください。"
+            "アプリで集めた数字と開示をもとに、**事業の概要・強み・リスク・株価水準の見方・今後の注目点**をまとめてもらえます。"
+            "Web 検索が使える設定なら、最新の決算資料やニュースも確認してくれます。"
+        )
+        prompt = company.build_prompt(code, info["name"], info["market"], info["sector"], view, val, co_disc, ne_text)
+        st.code(prompt, language=None, wrap_lines=True)
+        st.caption("AI の回答は間違えることがあります。数字は決算短信などの原本で確かめ、投資判断はご自身で行ってください。")

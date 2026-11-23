@@ -135,6 +135,30 @@ def fetch_avg_volume(symbols: list[str]) -> pd.Series:
         return pd.Series(dtype="float64")
 
 
+def fetch_valuation(symbol: str) -> dict:
+    """PER・PBR・配当利回り・時価総額（quote API）。認証トークンが取れない環境では空の dict。"""
+    try:
+        from yfinance.data import YfData
+
+        r = YfData().get(QUOTE_URL, params={"symbols": symbol})
+        r.raise_for_status()
+        res = r.json()["quoteResponse"]["result"]
+        if not res:
+            return {}
+        q = res[0]
+        cap = q.get("marketCap")
+        out = {
+            "per": q.get("trailingPE"),
+            "forward_per": q.get("forwardPE"),
+            "pbr": q.get("priceToBook"),
+            "dividend_yield": q.get("dividendYield"),  # % 表記（例: 1.4 = 1.4%）
+            "market_cap_oku": cap / 1e8 if cap else None,
+        }
+        return {k: v for k, v in out.items() if v is not None}
+    except Exception:
+        return {}
+
+
 def enrich(quotes: pd.DataFrame) -> pd.DataFrame:
     """コード、出来高倍率、ストップ高・安の判定を付ける。"""
     df = quotes.copy()

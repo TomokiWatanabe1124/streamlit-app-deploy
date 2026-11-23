@@ -117,3 +117,56 @@ def test_parse_chart_drops_empty_days():
     df = parse_chart(payload)
     assert len(df) == 2
     assert str(df.index[-1].date()) == "2026-11-20"
+
+
+# --- company ----------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+
+from stockapp import company  # noqa: E402
+
+
+def _hist(prices, vol=None):
+    idx = pd.bdate_range("2025-11-01", periods=len(prices))
+    p = pd.Series(prices, index=idx, dtype="float64")
+    return pd.DataFrame({"Open": p, "High": p * 1.01, "Low": p * 0.99, "Close": p,
+                         "Volume": vol if vol is not None else np.full(len(p), 1000.0)})
+
+
+def test_analyze_uptrend_high_zone():
+    h = _hist(np.linspace(1000, 2000, 260))
+    v = company.analyze(h)
+    assert v.trend == "上昇トレンド"
+    assert v.range_pos > 0.9
+    assert v.rsi14 == 100.0
+    texts = " ".join(t for _, t in v.comments)
+    assert "上昇トレンド" in texts and "高値圏" in texts and "買われすぎ" in texts
+
+
+def test_analyze_downtrend_low_zone_and_relative():
+    h = _hist(np.linspace(2000, 1000, 260))
+    bench = _hist(np.full(260, 100.0))
+    v = company.analyze(h, bench)
+    assert v.trend == "下降トレンド"
+    assert v.range_pos < 0.1
+    assert v.rel_3m < -5
+    assert any("TOPIX を" in t and "下回って" in t for _, t in v.comments)
+
+
+def test_analyze_volume_spike_and_short_history():
+    vol = np.r_[np.full(255, 1000.0), np.full(5, 3000.0)]
+    v = company.analyze(_hist(np.full(260, 500.0), vol))
+    assert v.vol_ratio_5_60 > 1.5
+    assert any("出来高" in t for _, t in v.comments)
+    assert company.analyze(_hist(np.full(10, 500.0))) is None
+
+
+def test_build_prompt_and_links():
+    v = company.analyze(_hist(np.linspace(1000, 1200, 260)))
+    disc = pd.DataFrame([{"day": "2026-11-20", "title": "業績予想の修正に関するお知らせ"}])
+    p = company.build_prompt("2801", "キッコーマン", "プライム", "食料品", v,
+                             {"per": 24.3, "dividend_yield": 1.4}, disc, "2027-02-04")
+    assert "キッコーマン" in p and "PER（実績）: 24.3倍" in p and "配当利回り: 1.40%" in p
+    assert "業績予想の修正" in p and "強み" in p and "リスク" in p
+    links = dict((n, u) for n, u, _ in company.external_links("2801", "キッコーマン"))
+    assert links["株探"].endswith("code=2801")

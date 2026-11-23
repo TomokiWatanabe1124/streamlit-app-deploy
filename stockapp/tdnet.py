@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import requests
@@ -65,6 +67,27 @@ def parse_page(html: bytes | str) -> tuple[list[dict], bool]:
     m = re.search(r"(\d+)～(\d+)件\s*/\s*全(\d+)件", text)
     has_next = bool(m) and int(m.group(2)) < int(m.group(3))
     return rows, has_next
+
+
+@functools.lru_cache(maxsize=64)
+def _fetch_past_day(day: dt.date) -> pd.DataFrame:
+    """過去の日の一覧は後から変わらないので、プロセス内で使い回す。"""
+    return fetch_day(day)
+
+
+def fetch_days(days: list[dt.date], today: dt.date, workers: int = 4) -> pd.DataFrame:
+    """複数日の一覧をまとめて取得する（day 列付き、新しい順）。"""
+
+    def one(d: dt.date) -> pd.DataFrame:
+        df = _fetch_past_day(d) if d < today else fetch_day(d)
+        return df.assign(day=d)
+
+    with ThreadPoolExecutor(workers) as ex:
+        frames = list(ex.map(one, sorted(days, reverse=True)))
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=COLUMNS + ["day"])
+    return pd.concat(frames, ignore_index=True)
 
 
 def fetch_day(day: dt.date) -> pd.DataFrame:
